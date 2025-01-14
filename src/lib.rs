@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 #![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 use cfg_if::cfg_if;
