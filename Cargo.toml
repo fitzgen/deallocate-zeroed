@@ -1,0 +1,43 @@
+[workspace]
+members = [
+  ".",
+  "crates/fuzzing",
+]
+
+[package]
+authors = ["Nick Fitzgerald <fitzgen@gmail.com>"]
+categories = ["memory-management", "rust-patterns", "no-std"]
+description = "An extension trait for allocators to deallocate already-zeroed memory."
+documentation = "https://docs.rs/deallocate-zeroed"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+name = "deallocate-zeroed"
+readme = "README.md"
+repository = "https://github.com/fitzgen/deallocate-zeroed"
+version = "0.1.0"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+allocator-api2 = { version = "0.2.21", default-features = false, optional = true }
+cfg-if = "1.0.0"
+intrusive_splay_tree = { version = "0.2.2", optional = true }
+
+[features]
+default = ["allocator_api2", "zero_aware_allocator"]
+
+# Enable usage of the unstable, nightly-only `core::alloc::Allocator` Rust
+# feature.
+allocator_api = []
+
+# Enable usage of the stable polyfill for the `core::alloc::Allocator` Rust
+# feature.
+allocator_api2 = ["dep:allocator-api2"]
+
+# Enable the zero-aware allocator that wraps an underlying allocator and
+# additionally keeps track of which memory blocks are already zeroed. This lets
+# you move zeroing for `allocate_zeroed` from allocation time and to
+# deallocation time, which is useful when `allocate_zeroed` is on your
+# application's critical path but deallocation is not.
+zero_aware_allocator = ["dep:intrusive_splay_tree"]
