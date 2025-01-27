@@ -30,9 +30,9 @@ jobs:
           rust_channel: nightly
         - features: "--no-default-features --features allocator_api,zero_aware_allocator"
           rust_channel: nightly
-    name: Test (${{rust_channel}}; ${{ matrix.features }})
+    name: Test (${{ matrix.rust_channel }}; ${{ matrix.features }})
     steps:
     - uses: actions/checkout@v4
-    - run: rustup toolchain install ${{ rust_channel }}
-    - run: rustup default ${{ rust_channel }}
-    - run: cargo test --verbose ${{ features }}
+    - run: rustup toolchain install ${{ matrix.rust_channel }}
+    - run: rustup default ${{ matrix.rust_channel }}
+    - run: cargo test --verbose ${{ matrix.features }}
