@@ -1,0 +1,38 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: rustup update
+    - run: rustup install component rustfmt
+    - run: cargo fmt --all --check
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+        - features: "--no-default-features --features allocator_api2"
+          rust_channel: stable
+        - features: "--no-default-features --features allocator_api2,zero_aware_allocator"
+          rust_channel: stable
+        - features: "--no-default-features --features allocator_api"
+          rust_channel: nightly
+        - features: "--no-default-features --features allocator_api,zero_aware_allocator"
+          rust_channel: nightly
+    name: Test (${{rust_channel}}; ${{ matrix.features }})
+    steps:
+    - uses: actions/checkout@v4
+    - run: rustup toolchain install ${{ rust_channel }}
+    - run: rustup default ${{ rust_channel }}
+    - run: cargo test --verbose ${{ features }}
