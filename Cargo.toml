@@ -14,7 +14,7 @@ license = "MIT OR Apache-2.0"
 name = "deallocate-zeroed"
 readme = "README.md"
 repository = "https://github.com/fitzgen/deallocate-zeroed"
-version = "0.1.0"
+version = "0.2.0"
 
 [package.metadata.docs.rs]
 all-features = true

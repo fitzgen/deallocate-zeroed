@@ -35,8 +35,7 @@ use super::*;
 use metadata::{BlockInfo, FreeList};
 
 mod mutex;
-use mutex::*;
-pub use mutex::{Lock, SingleThreadedLock};
+pub use mutex::{LockingMechanism, Mutex, MutexGuard, SingleThreadedLockingMechanism};
 
 /// The maximum alignment for which we have an align-class.
 const MAX_ALIGN_WITH_CLASS: usize = 4096;
@@ -75,12 +74,12 @@ const ACCEPTABLE_WASTE_DIVISOR: usize = 8;
 ///
 /// Because this crate is `no_std` and does not assume the presence of an
 /// operating system, you must provide your own locking mechanism via the `L`
-/// type parameter. See the [`Lock`] trait for details.
+/// type parameter. See the [`LockingMechanism`] trait for details.
 #[derive(Default)]
 pub struct ZeroAwareAllocator<A, L>
 where
     A: Allocator,
-    L: Lock,
+    L: LockingMechanism,
 {
     /// The underlying allocator.
     inner: A,
@@ -102,7 +101,7 @@ struct Zeroed {
 impl<A, L> ZeroAwareAllocator<A, L>
 where
     A: Allocator,
-    L: Lock,
+    L: LockingMechanism,
 {
     /// Create a new `ZeroAwareAllocator` that wraps the given `inner`
     /// allocator.
@@ -269,7 +268,7 @@ where
 impl<A, L> Drop for ZeroAwareAllocator<A, L>
 where
     A: Allocator,
-    L: Lock,
+    L: LockingMechanism,
 {
     fn drop(&mut self) {
         self.return_zeroed_memory_to_inner();
@@ -279,7 +278,7 @@ where
 unsafe impl<A, L> Allocator for ZeroAwareAllocator<A, L>
 where
     A: Allocator,
-    L: Lock,
+    L: LockingMechanism,
 {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -364,7 +363,7 @@ where
 impl<A, L> DeallocateZeroed for ZeroAwareAllocator<A, L>
 where
     A: Allocator,
-    L: Lock,
+    L: LockingMechanism,
 {
     unsafe fn deallocate_zeroed(&self, pointer: NonNull<u8>, layout: Layout) {
         self.deallocate_already_zeroed(pointer, layout);

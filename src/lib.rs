@@ -13,7 +13,9 @@ pub use default::DefaultDeallocateZeroed;
 cfg_if! {
     if #[cfg(feature = "zero_aware_allocator")] {
         mod zero_aware_allocator;
-        pub use zero_aware_allocator::{Lock, SingleThreadedLock, ZeroAwareAllocator};
+        pub use zero_aware_allocator::{
+            LockingMechanism, Mutex, MutexGuard, SingleThreadedLockingMechanism, ZeroAwareAllocator,
+        };
     }
 }
 

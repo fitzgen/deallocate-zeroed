@@ -3,7 +3,8 @@
 #![feature(allocator_api)]
 
 use deallocate_zeroed::{
-    Allocator, DeallocateZeroed, Lock, SingleThreadedLock, ZeroAwareAllocator,
+    Allocator, DeallocateZeroed, LockingMechanism, SingleThreadedLockingMechanism,
+    ZeroAwareAllocator,
 };
 use mutatis::{mutators as m, DefaultMutate, Generate, Mutate};
 use std::{collections::BTreeMap, mem, ptr::NonNull};
@@ -311,7 +312,8 @@ impl Ops {
 
     /// Run these test operations with the given allocation limit.
     pub fn run(&self, allocation_limit: usize) -> Result<(), String> {
-        let allocator = ZeroAwareAllocator::new(std::alloc::System, SingleThreadedLock::new());
+        let allocator =
+            ZeroAwareAllocator::new(std::alloc::System, SingleThreadedLockingMechanism::new());
         self.run_with_allocator(allocator, allocation_limit)
     }
 
@@ -323,7 +325,7 @@ impl Ops {
     ) -> Result<(), String>
     where
         A: Allocator,
-        L: Lock,
+        L: LockingMechanism,
     {
         log::debug!("========== Running test operations ==========");
 

@@ -10,8 +10,8 @@ use core::{
 /// A trait for providing mutual exclusion.
 ///
 /// If you do not need to use the allocator, and collections using it, in a
-/// multi-threaded environment, you may use [`SingleThreadedLock`], which is the
-/// moral equivalent of a `RefCell`.
+/// multi-threaded environment, you may use [`SingleThreadedLockingMechanism`],
+/// which is the moral equivalent of a `RefCell`.
 ///
 /// # Safety
 ///
@@ -23,7 +23,7 @@ use core::{
 ///   required, this type must prevent recursive locking and re-entering the
 ///   lock when it is already held. The prevention may be a panic, abort,
 ///   infinite loop, or etc...
-pub unsafe trait Lock {
+pub unsafe trait LockingMechanism {
     /// Lock this mutex.
     ///
     /// If it is already locked, this must result in a panic, abort, infinite
@@ -34,16 +34,24 @@ pub unsafe trait Lock {
     fn unlock(&self);
 }
 
-/// A single-threaded implementation of [`Lock`].
+/// A single-threaded implementation of [`LockingMechanism`].
 ///
 /// This is effectively a `RefCell`. It allows using the `ZeroAwareAllocator` in
 /// single-threaded scenarios.
 #[derive(Debug)]
-pub struct SingleThreadedLock {
+pub struct SingleThreadedLockingMechanism {
     locked: Cell<bool>,
 }
 
-unsafe impl Lock for SingleThreadedLock {
+/// ```compile_fail
+/// use deallocate_zeroed::*;
+/// fn assert_sync<S: Sync>() {}
+/// assert_sync::<SingleThreadedLockingMechanism>();
+/// ```
+#[cfg(doctest)]
+struct _SingleThreadedLockingMechanismIsNotSync;
+
+unsafe impl LockingMechanism for SingleThreadedLockingMechanism {
     #[inline]
     fn lock(&self) {
         assert!(!self.locked.get());
@@ -57,25 +65,26 @@ unsafe impl Lock for SingleThreadedLock {
     }
 }
 
-impl Default for SingleThreadedLock {
+impl Default for SingleThreadedLockingMechanism {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SingleThreadedLock {
-    /// Construct a new `SingleThreadedLock`.
+impl SingleThreadedLockingMechanism {
+    /// Construct a new `SingleThreadedLockingMechanism`.
     #[inline]
-    pub fn new() -> Self {
-        SingleThreadedLock {
+    pub const fn new() -> Self {
+        SingleThreadedLockingMechanism {
             locked: Cell::new(false),
         }
     }
 }
 
+/// Similar to `std::sync::Mutex<T>` but built on top of [`LockingMechanism`].
 #[derive(Default)]
-pub(super) struct Mutex<T, L> {
+pub struct Mutex<T, L> {
     lock: L,
     value: UnsafeCell<T>,
 }
@@ -90,7 +99,7 @@ where
 {
 }
 
-// Safety: upheld by the `Lock` trait's implementation contract.
+// Safety: upheld by the `LockingMechanism` trait's implementation contract.
 //
 // Additionally, `T` must be `Send` because locking a mutex from another thread
 // and getting a mutex guard allows getting `&mut T`, which can be used to
@@ -98,35 +107,38 @@ where
 unsafe impl<T, L> Sync for Mutex<T, L>
 where
     T: Send,
-    L: Sync + Lock,
+    L: Sync + LockingMechanism,
 {
 }
 
 impl<T, L> Mutex<T, L>
 where
-    L: Lock,
+    L: LockingMechanism,
 {
-    pub(super) const fn new(value: T, lock: L) -> Self {
+    /// Construct a new `Mutex` with the given locking mechanism.
+    pub const fn new(value: T, lock: L) -> Self {
         let value = UnsafeCell::new(value);
         Mutex { lock, value }
     }
 
-    pub(super) fn lock(&self) -> MutexGuard<'_, T, L> {
+    /// Lock this `Mutex`.
+    pub fn lock(&self) -> MutexGuard<'_, T, L> {
         self.lock.lock();
         MutexGuard { mutex: self }
     }
 }
 
-pub(super) struct MutexGuard<'a, T, L>
+/// Like `std::sync::MutexGuard<T>` but built on top of [`LockingMechanism`].
+pub struct MutexGuard<'a, T, L>
 where
-    L: Lock,
+    L: LockingMechanism,
 {
     mutex: &'a Mutex<T, L>,
 }
 
 impl<'a, T, L> Drop for MutexGuard<'a, T, L>
 where
-    L: Lock,
+    L: LockingMechanism,
 {
     fn drop(&mut self) {
         self.mutex.lock.unlock();
@@ -135,7 +147,7 @@ where
 
 impl<T, L> Deref for MutexGuard<'_, T, L>
 where
-    L: Lock,
+    L: LockingMechanism,
 {
     type Target = T;
 
@@ -147,7 +159,7 @@ where
 
 impl<T, L> DerefMut for MutexGuard<'_, T, L>
 where
-    L: Lock,
+    L: LockingMechanism,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.mutex.value.get() }
