@@ -15,13 +15,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: rustup update
-    - run: rustup install component rustfmt
+    - run: rustup component add rustfmt
     - run: cargo fmt --all --check
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
+        - features: "" # default features
+          rust_channel: stable
         - features: "--no-default-features --features allocator_api2"
           rust_channel: stable
         - features: "--no-default-features --features allocator_api2,zero_aware_allocator"
