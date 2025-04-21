@@ -1,0 +1,22 @@
+[package]
+name = "deallocate-zeroed-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bincode = { workspace = true }
+env_logger = { workspace = true }
+deallocate-zeroed-fuzzing = { path = "../crates/fuzzing" }
+libfuzzer-sys = "0.4"
+mutatis = { workspace = true }
+
+[[bin]]
+name = "ops"
+path = "fuzz_targets/ops.rs"
+test = false
+doc = false
+bench = false
