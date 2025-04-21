@@ -49,6 +49,8 @@ impl Layout {
     }
 
     fn align(&self) -> usize {
+        // NB: We cannot trust that `self.align` is a valid alignment because
+        // `libfuzzer` could have arbitrarily mutated its bytes.
         let align = self.align.checked_next_power_of_two().unwrap_or(1);
         align.min(MAX_ALIGN)
     }
@@ -56,15 +58,25 @@ impl Layout {
     fn size(&self) -> usize {
         let align = self.align();
 
-        if self
+        // NB: We cannot trust that `self.size` is a valid alignment because
+        // `libfuzzer` could have arbitrarily mutated its bytes.
+        let size = if self
             .size
             .checked_next_multiple_of(align)
             .is_some_and(|s| s < (isize::MAX as usize))
         {
             self.size
         } else {
-            align
-        }
+            ((isize::MAX as usize) - align)
+                .checked_next_multiple_of(align)
+                .unwrap()
+        };
+
+        debug_assert!(size
+            .checked_next_multiple_of(align)
+            .is_some_and(|s| s < (isize::MAX as usize)));
+
+        size
     }
 
     fn alloc_layout(&self) -> std::alloc::Layout {
