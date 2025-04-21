@@ -5,9 +5,10 @@ edition = "2021"
 publish = false
 
 [dependencies]
+bincode = { workspace = true }
 deallocate-zeroed = { path = "../..", features = ["allocator_api", "zero_aware_allocator"] }
-log = "0.4.22"
-mutatis = { version = "0.3.1", features = ["check", "derive"] }
+log = { workspace = true }
+mutatis = { workspace = true }
 
 [dev-dependencies]
-env_logger = "0.11.6"
+env_logger = { workspace = true }

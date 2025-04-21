@@ -14,11 +14,13 @@ use std::{collections::BTreeMap, mem, ptr::NonNull};
 // Note: it is easier to define our own layout type here than to reuse
 // `std::alloc::Layout` because we want to define a default mutator for `Layout`
 // but trait orphan rules make that impossible.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, bincode::Encode, bincode::Decode)]
 pub struct Layout {
     size: usize,
     align: usize,
 }
+
+const MAX_ALIGN: usize = 1 << 16;
 
 impl Default for Layout {
     fn default() -> Self {
@@ -46,9 +48,50 @@ impl Layout {
         }
     }
 
+    fn align(&self) -> usize {
+        // Alignment must be a power of two and less than or equal to
+        // `isize::MAX`.
+        //
+        // NB: We cannot assume that `self.align` is a valid alignment because
+        // `libfuzzer` could have arbitrarily mutated its bytes.
+        let align = self.align.checked_next_power_of_two().unwrap_or(1);
+        align.min(MAX_ALIGN)
+    }
+
+    fn size(&self) -> usize {
+        let align = self.align();
+
+        // The size must not overflow `isize::MAX` when rounded up to our
+        // alignment.
+        //
+        // NB: We cannot assume that `self.size` is a valid alignment because
+        // `libfuzzer` could have arbitrarily mutated its bytes.
+        let size = if self
+            .size
+            .checked_next_multiple_of(align)
+            .is_some_and(|s| s < (isize::MAX as usize))
+        {
+            self.size
+        } else {
+            ((isize::MAX as usize) - align)
+                .checked_next_multiple_of(align)
+                .unwrap()
+        };
+
+        debug_assert!(size
+            .checked_next_multiple_of(align)
+            .is_some_and(|s| s < (isize::MAX as usize)));
+
+        size
+    }
+
     fn alloc_layout(&self) -> std::alloc::Layout {
-        std::alloc::Layout::from_size_align(self.size, self.align)
-            .expect("should have a valid size and align")
+        let align = self.align();
+        let size = self.size();
+        match std::alloc::Layout::from_size_align(size, align) {
+            Ok(l) => l,
+            Err(e) => panic!("should be a valid layout: size={size}, align={align}; got {e}"),
+        }
     }
 }
 
@@ -101,9 +144,9 @@ impl Mutate<Layout> for LayoutMutator {
         // Mutate size.
         c.mutation(|ctx| {
             let max_size = if ctx.shrink() {
-                layout.size
+                layout.size()
             } else {
-                std::cmp::min(self.max_size, max_size_for_align(layout.align))
+                std::cmp::min(self.max_size, max_size_for_align(layout.align()))
             };
             layout.size = ctx.rng().gen_index(max_size + 1).unwrap();
             Ok(())
@@ -112,11 +155,11 @@ impl Mutate<Layout> for LayoutMutator {
         // Mutate alignment.
         c.mutation(|ctx| {
             let max_align_log2 = if ctx.shrink() {
-                layout.align.trailing_zeros() as usize
+                layout.align().trailing_zeros() as usize
             } else {
                 std::cmp::min(
                     self.max_align.trailing_zeros() as usize,
-                    max_align_for_size(layout.size).trailing_zeros() as usize,
+                    max_align_for_size(layout.size()).trailing_zeros() as usize,
                 )
             };
             let align_log2 = ctx.rng().gen_index(max_align_log2 + 1).unwrap();
@@ -138,7 +181,7 @@ impl Generate<Layout> for LayoutMutator {
 }
 
 /// A test operation.
-#[derive(Clone, Debug, Mutate)]
+#[derive(Clone, Debug, Mutate, bincode::Encode, bincode::Decode)]
 pub enum Op {
     Alloc { id: u32, layout: Layout },
     Dealloc { id: u32 },
@@ -203,6 +246,47 @@ impl Generate<Op> for OpMutator {
 #[derive(Clone, Debug, Default)]
 pub struct Ops {
     ops: Vec<Op>,
+}
+
+// Note: we use custom implementations of `Encode` and `Decode` so that we can
+// limit the size of `ops`; otherwise, `bincode` will attempt to allocate an
+// array of arbitrary length from the fuzzer-supplied data, which leads to OOMs.
+const MAX_OPS_TO_DECODE: usize = 1_000;
+impl<C> bincode::Decode<C> for Ops {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let len = u64::decode(decoder)?;
+        let len = usize::try_from(len)
+            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
+        if len > MAX_OPS_TO_DECODE {
+            return Err(bincode::error::DecodeError::OtherString(format!(
+                "cannot decode an `Ops` of length {len}; max supported length is \
+                 {MAX_OPS_TO_DECODE}"
+            )));
+        }
+        let mut ops = Vec::with_capacity(len);
+        for _ in 0..len {
+            let op = Op::decode(decoder)?;
+            ops.push(op);
+        }
+        Ok(Ops { ops })
+    }
+}
+
+impl bincode::Encode for Ops {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let len = self.ops.len();
+        let len = u64::try_from(len).unwrap();
+        u64::encode(&len, encoder)?;
+        for op in &self.ops {
+            Op::encode(op, encoder)?;
+        }
+        Ok(())
+    }
 }
 
 impl DefaultMutate for Ops {
@@ -296,9 +380,11 @@ macro_rules! ensure {
     ( $cond:expr , $msg:expr $( , $args:expr )* $(,)? ) => {{
         let cond = $cond;
         if !cond {
+            let file = file!();
+            let line = line!();
             let msg = format!($msg $( , $args )* );
-            let str_cond = stringify!($cond);
-            return Err(format!("check failed: `{str_cond}`: {msg}"));
+            let cond = stringify!($cond);
+            return Err(format!("{file}:{line}: check failed: `{cond}`: {msg}"));
         }
     }};
 }
@@ -308,6 +394,13 @@ impl Ops {
     pub fn new(ops: impl IntoIterator<Item = Op>) -> Self {
         let ops = ops.into_iter().collect();
         Ops { ops }
+    }
+
+    /// Pop an operation off the end of this sequence. Returns whether an
+    /// operation was actually popped or not (i.e. whether this sequence was
+    /// non-empty before calling `pop`).
+    pub fn pop(&mut self) -> bool {
+        self.ops.pop().is_some()
     }
 
     /// Run these test operations with the given allocation limit.
@@ -333,6 +426,11 @@ impl Ops {
 
         // Fill an allocation with the given byte pattern.
         let fill = |ptr: NonNull<[u8]>, byte: u8| unsafe {
+            log::trace!(
+                "fill {:#p}..{:#p} with {byte:#0x}",
+                ptr.cast::<u8>(),
+                ptr.cast::<u8>().add(ptr.len())
+            );
             ptr.cast::<u8>().write_bytes(byte, ptr.len());
         };
 
@@ -351,25 +449,44 @@ impl Ops {
 
         // Assert that the given allocation is zeroed.
         let assert_zeroed = |ptr: NonNull<[u8]>| -> Result<(), String> {
-            let slice = unsafe { ptr.as_ref() };
-            ensure!(
-                slice.iter().all(|b| *b == 0),
-                "supposedly zeroed block of memory contains non-zero byte",
+            log::trace!(
+                "assert_zeroed(ptr = {ptr:#p}..{:#p} (len = {}))",
+                unsafe { ptr.cast::<u8>().add(ptr.len()) },
+                ptr.len()
             );
+            let slice = unsafe { ptr.as_ref() };
+            for b in slice {
+                ensure!(
+                    *b == 0,
+                    "supposedly zeroed block of memory contains non-zero byte {:#0x} at {:#p}",
+                    *b,
+                    b as *const _,
+                );
+            }
             Ok(())
         };
 
         // Assert that the given allocation satisfies its requested layout.
         let assert_fits_layout =
             |ptr: NonNull<[u8]>, layout: std::alloc::Layout| -> Result<(), String> {
-                ensure!(
-                    layout.size() <= ptr.len(),
-                    "actual allocated size is less than expected layout size",
+                log::trace!(
+                    "assert_fits_layout(ptr = {ptr:#p}..{:#p} (len = {}), layout = {layout:?})",
+                    unsafe { ptr.cast::<u8>().add(ptr.len()) },
+                    ptr.len()
                 );
+                let actual_size = ptr.len();
+                let expected_size = layout.size();
                 ensure!(
-                    layout.align().trailing_zeros()
-                        <= (ptr.cast::<u8>().as_ptr() as usize).trailing_zeros(),
-                    "actual allocated alignment is less than expected layout alignment",
+                    actual_size >= expected_size,
+                    "actual allocated size ({actual_size}) is less than expected layout size \
+                     ({expected_size})",
+                );
+                let actual_align = 1 << (ptr.cast::<u8>().as_ptr() as usize).trailing_zeros();
+                let expected_align = layout.align();
+                ensure!(
+                    actual_align >= expected_align,
+                    "actual allocated alignment ({actual_align}) is less than expected layout \
+                     alignment ({expected_align})",
                 );
                 Ok(())
             };
@@ -478,7 +595,7 @@ impl Ops {
 
             match op {
                 Op::Alloc { id, layout } => {
-                    if live.beyond_allocation_limit(layout.size) {
+                    if live.beyond_allocation_limit(layout.size()) {
                         continue;
                     }
 
@@ -502,7 +619,7 @@ impl Ops {
                 }
 
                 Op::AllocZeroed { id, layout } => {
-                    if live.beyond_allocation_limit(layout.size) {
+                    if live.beyond_allocation_limit(layout.size()) {
                         continue;
                     }
 
@@ -703,7 +820,9 @@ impl LiveMap {
 
     /// Would an allocation of the given size push us past our allocation limit?
     fn beyond_allocation_limit(&self, size: usize) -> bool {
-        self.total_allocated_bytes + size > self.allocation_limit
+        self.total_allocated_bytes
+            .checked_add(size)
+            .is_none_or(|n| n > self.allocation_limit)
     }
 
     /// Insert a new live allocation.

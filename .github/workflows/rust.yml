@@ -17,6 +17,18 @@ jobs:
     - run: rustup update
     - run: rustup component add rustfmt
     - run: cargo fmt --all --check
+
+  fuzz:
+    runs-on: ubtuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: rustup toolchain install nightly
+    - run: rustup default nightly
+    - run: cargo install cargo-fuzz
+    - run: cargo fuzz build ops --sanitizer none
+    # Smoke test: run the fuzzer for 3 minutes.
+    - run: cargo fuzz run ops --sanitizer none -- -timeout=180
+
   build:
     runs-on: ubuntu-latest
     strategy:
