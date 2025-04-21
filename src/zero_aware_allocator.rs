@@ -226,9 +226,7 @@ where
     /// Does not fallback to the inner allocator upon allocation failure.
     #[inline]
     fn allocate_already_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        if layout.size() == 0 {
-            return Ok(NonNull::from(&[]));
-        }
+        debug_assert_ne!(layout.size(), 0);
 
         // The index of this layout's align-class, if we have one.
         let align_class = layout.align().ilog2() as usize;
@@ -279,16 +277,13 @@ where
             let slice = core::slice::from_raw_parts(ptr.as_ptr().cast_const(), layout.size());
             slice.iter().all(|b| *b == 0)
         });
-
-        if layout.size() == 0 {
-            return;
-        }
+        debug_assert_ne!(layout.size(), 0);
 
         let mut zeroed = self.zeroed.lock();
         let zeroed = &mut *zeroed;
         let node = match zeroed.live_set.remove(&ptr) {
             Some(node) => {
-                // The actual layout should imply the user layout.
+                // The actual layout should contain the user layout.
                 debug_assert!(node.layout().size() >= layout.size());
                 debug_assert!(node.layout().align() >= layout.align());
                 // And any fragmentation we had accepted still be zeroed.
@@ -412,13 +407,6 @@ where
 {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        if layout.size() == 0 {
-            let dangling = core::ptr::without_provenance::<u8>(layout.align());
-            let dangling = NonNull::new(dangling.cast_mut()).unwrap();
-            let dangling = NonNull::slice_from_raw_parts(dangling, 0);
-            return Ok(dangling);
-        }
-
         self.inner
             .allocate(layout)
             .or_else(|_| self.allocate_already_zeroed(layout))
@@ -427,10 +415,7 @@ where
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, user_layout: Layout) {
         if user_layout.size() == 0 {
-            debug_assert_eq!(
-                ptr.as_ptr().cast_const(),
-                core::ptr::without_provenance(user_layout.align())
-            );
+            self.inner.deallocate(ptr, user_layout);
             return;
         }
 
@@ -449,10 +434,7 @@ where
     #[inline]
     fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
-            let dangling = core::ptr::without_provenance::<u8>(layout.align());
-            let dangling = NonNull::new(dangling.cast_mut()).unwrap();
-            let dangling = NonNull::slice_from_raw_parts(dangling, 0);
-            return Ok(dangling);
+            return self.inner.allocate_zeroed(layout);
         }
 
         self.allocate_already_zeroed(layout)
@@ -467,11 +449,7 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if user_old_layout.size() == 0 {
-            debug_assert_eq!(
-                ptr.as_ptr().cast_const(),
-                core::ptr::without_provenance(user_old_layout.align())
-            );
-            return self.allocate(new_layout);
+            return self.grow(ptr, user_old_layout, new_layout);
         }
 
         let actual_old_layout = match self.pre_grow(ptr, user_old_layout, new_layout) {
@@ -517,10 +495,6 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if user_old_layout.size() == 0 {
-            debug_assert_eq!(
-                ptr.as_ptr().cast_const(),
-                core::ptr::without_provenance(user_old_layout.align())
-            );
             return self.allocate_zeroed(new_layout);
         }
 
@@ -575,14 +549,7 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if old_layout.size() == 0 {
-            debug_assert_eq!(
-                ptr.as_ptr().cast_const(),
-                core::ptr::without_provenance(old_layout.align())
-            );
-            let dangling = core::ptr::without_provenance::<u8>(new_layout.align());
-            let dangling = NonNull::new(dangling.cast_mut()).unwrap();
-            let dangling = NonNull::slice_from_raw_parts(dangling, 0);
-            return Ok(dangling);
+            return self.inner.shrink(ptr, old_layout, new_layout);
         }
 
         // We can't split allocations ourselves, so just defer to the inner
@@ -614,10 +581,7 @@ where
 {
     unsafe fn deallocate_zeroed(&self, ptr: NonNull<u8>, layout: Layout) {
         if layout.size() == 0 {
-            debug_assert_eq!(
-                ptr.as_ptr().cast_const(),
-                core::ptr::without_provenance(layout.align())
-            );
+            self.inner.deallocate(ptr, layout);
             return;
         }
 
