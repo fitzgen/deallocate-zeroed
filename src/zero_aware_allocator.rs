@@ -456,7 +456,13 @@ where
             PreGrow::Reuse {
                 ptr,
                 actual_layout: _,
-            } => return Ok(ptr),
+            } => {
+                // No need to update our metadata here: the caller is
+                // responsible for keeping track of the correct `Layout` and the
+                // size of the actual underlying block didn't grow os we have
+                // nothing to change.
+                return Ok(ptr);
+            }
             PreGrow::DoGrow { actual_old_layout } => actual_old_layout,
         };
 
@@ -507,6 +513,11 @@ where
                 let slop = ptr.cast::<u8>().add(user_old_layout.size());
                 let slop_len = actual_layout.size() - user_old_layout.size();
                 slop.write_bytes(0, slop_len);
+
+                // No need to update our metadata here: the caller is
+                // responsible for keeping track of the correct `Layout` and the
+                // size of the actual underlying block didn't grow os we have
+                // nothing to change.
                 return Ok(ptr);
             }
             PreGrow::DoGrow { actual_old_layout } => actual_old_layout,
@@ -559,7 +570,7 @@ where
         let zeroed = &mut *zeroed;
 
         // Make sure that we are passing the original, underlying `Layout` to
-        // the inner allocator. After shrinking, this pointer will no longer
+        // the inner allocator. After shrinking, this pointer will no longer be
         // managed by us, so remove and deallocate its block-info node from the
         // live-set (if any).
         let old_layout = if let Some(node) = zeroed.live_set.remove(&ptr) {
