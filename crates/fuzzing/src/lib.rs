@@ -49,7 +49,10 @@ impl Layout {
     }
 
     fn align(&self) -> usize {
-        // NB: We cannot trust that `self.align` is a valid alignment because
+        // Alignment must be a power of two and less than or equal to
+        // `isize::MAX`.
+        //
+        // NB: We cannot assume that `self.align` is a valid alignment because
         // `libfuzzer` could have arbitrarily mutated its bytes.
         let align = self.align.checked_next_power_of_two().unwrap_or(1);
         align.min(MAX_ALIGN)
@@ -58,7 +61,10 @@ impl Layout {
     fn size(&self) -> usize {
         let align = self.align();
 
-        // NB: We cannot trust that `self.size` is a valid alignment because
+        // The size must not overflow `isize::MAX` when rounded up to our
+        // alignment.
+        //
+        // NB: We cannot assume that `self.size` is a valid alignment because
         // `libfuzzer` could have arbitrarily mutated its bytes.
         let size = if self
             .size
