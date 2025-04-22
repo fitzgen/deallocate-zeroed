@@ -37,7 +37,16 @@ jobs:
 
     # Smoke test: run the fuzzer for 3 minutes.
     - run: cargo fuzz build ops
-    - run: cargo fuzz run ops -- -timeout=180
+    - run: RUST_LOG=trace cargo fuzz run ops -- -timeout=180 2> fuzz.log
+
+    # Upload fuzzing artifacts for debugging on failure.
+    - uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: fuzzing-artifacts-${{ github.sha }}
+        path: |
+          fuzz.log
+          fuzz/artifacts
 
   fuzzing_crate:
     runs-on: ubuntu-latest
