@@ -387,13 +387,38 @@ where
         user_old_layout: Layout,
         new_layout: Layout,
     ) -> PreGrow {
+        // Correctly sized.
+        debug_assert_ne!(user_old_layout.size(), 0);
+
+        // Correctly aligned.
+        debug_assert_eq!(
+            ptr.as_ptr() as usize % user_old_layout.align(),
+            0,
+            "{ptr:#p} should be aligned to user's layout's alignment of {:#x}",
+            user_old_layout.align()
+        );
+
         let mut zeroed = self.zeroed.lock();
         let zeroed = &mut *zeroed;
 
         let actual_old_layout = if let Some(node) = zeroed.live_set.find(&ptr) {
             debug_assert_eq!(node.ptr(), ptr);
+
+            // Correctly sized.
             debug_assert!(node.layout().size() >= user_old_layout.size());
-            debug_assert!(node.layout().align() >= user_old_layout.align());
+
+            // Correctly aligned.
+            //
+            // NB: it is not necessarily the case that the original layout's
+            // align is greater than or equal to the user layout's align in the
+            // case where we reused an allocation that happened to be aligned
+            // greater than its original layout requested.
+            debug_assert_eq!(
+                ptr.as_ptr() as usize % node.layout().align(),
+                0,
+                "{ptr:#p} should be aligned to original layout's alignment of {:#x}",
+                node.layout().align()
+            );
 
             // If this is an allocation that was originally already zeroed,
             // and its original inner layout can already satisfy this new
