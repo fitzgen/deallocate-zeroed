@@ -480,6 +480,31 @@ enum PreGrow {
     /// less-than-requested alignment, but its actual size is *larger* than the
     /// new layout's size. Therefore, we need to use the inner allocator to
     /// shrink instead of grow.
+    ///
+    /// For example, consider this sequence of events:
+    ///
+    /// * `allocate(Layout { size: 4096, align: 16 }) -> 0x12345670`
+    ///
+    ///   An initial allocation satisfied via the inner allocator.
+    ///
+    /// * `deallocate_zeroed(0x12345670, ..)`
+    ///
+    ///   That allocation is now tracked in our internal free lists for
+    ///   already-zeroed blocks.
+    ///
+    /// * `allocate_zeroed(Layout { size: 4000, align: 16 }) -> 0x12345670`
+    ///
+    ///   We satisfy a new zeroed-allocation request with this block, accepting
+    ///   that it will result in some small amount of fragmentation slop.
+    ///
+    /// * `grow(0x12345670, Layout { size: 4001, align: 256 })`
+    ///
+    ///   The user wants to grow the allocation by one byte *and* realign it to
+    ///   256. Although we have capacity in this allocation for that growth, it
+    ///   is not aligned to 256. Because the original, underlying allocation's
+    ///   size is larger than the new size that the user has asked us to "grow"
+    ///   this allocation to, we must actually call the inner allocator's
+    ///   `shrink` method.
     DoShrink { actual_old_layout: Layout },
 }
 
