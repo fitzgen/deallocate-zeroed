@@ -389,6 +389,26 @@ macro_rules! ensure {
     }};
 }
 
+struct FmtPtrSlice(NonNull<[u8]>);
+
+impl std::fmt::Debug for FmtPtrSlice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:#p}..{:#p} (len = {})",
+            self.0.cast::<u8>(),
+            unsafe { self.0.cast::<u8>().add(self.0.len()) },
+            self.0.len(),
+        )
+    }
+}
+
+impl std::fmt::Display for FmtPtrSlice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
 impl Ops {
     /// Create a new `Ops` from the given test operations.
     pub fn new(ops: impl IntoIterator<Item = Op>) -> Self {
@@ -413,24 +433,24 @@ impl Ops {
     /// Run these test operations with the given allocator and allocation limit.
     pub fn run_with_allocator<A, L>(
         &self,
-        allocator: ZeroAwareAllocator<A, L>,
+        mut allocator: ZeroAwareAllocator<A, L>,
         allocation_limit: usize,
     ) -> Result<(), String>
     where
         A: Allocator,
         L: LockingMechanism,
     {
-        log::debug!("========== Running test operations ==========");
+        log::debug!(
+            "\n\n\n\n============================== \
+             Running test operations \
+             ==============================\n\n\n\n"
+        );
 
         let mut live = LiveMap::new(allocation_limit);
 
         // Fill an allocation with the given byte pattern.
         let fill = |ptr: NonNull<[u8]>, byte: u8| unsafe {
-            log::trace!(
-                "fill {:#p}..{:#p} with {byte:#0x}",
-                ptr.cast::<u8>(),
-                ptr.cast::<u8>().add(ptr.len())
-            );
+            log::trace!("fill(ptr = {}, {byte:#0x})", FmtPtrSlice(ptr));
             ptr.cast::<u8>().write_bytes(byte, ptr.len());
         };
 
@@ -439,9 +459,15 @@ impl Ops {
             log::debug!("deallocating id{id} -> {alloc:?}");
             unsafe {
                 if alloc.zeroed {
+                    log::trace!(
+                        "deallocate_zeroed({}, {:?})",
+                        FmtPtrSlice(alloc.ptr),
+                        alloc.layout
+                    );
                     allocator.deallocate_zeroed(alloc.ptr.cast(), alloc.layout);
                 } else {
                     fill(alloc.ptr, FREE_POISON_PATTERN);
+                    log::trace!("deallocate({}, {:?})", FmtPtrSlice(alloc.ptr), alloc.layout);
                     allocator.deallocate(alloc.ptr.cast(), alloc.layout);
                 }
             }
@@ -449,11 +475,7 @@ impl Ops {
 
         // Assert that the given allocation is zeroed.
         let assert_zeroed = |ptr: NonNull<[u8]>| -> Result<(), String> {
-            log::trace!(
-                "assert_zeroed(ptr = {ptr:#p}..{:#p} (len = {}))",
-                unsafe { ptr.cast::<u8>().add(ptr.len()) },
-                ptr.len()
-            );
+            log::trace!("assert_zeroed({})", FmtPtrSlice(ptr));
             let slice = unsafe { ptr.as_ref() };
             for b in slice {
                 ensure!(
@@ -470,9 +492,8 @@ impl Ops {
         let assert_fits_layout =
             |ptr: NonNull<[u8]>, layout: std::alloc::Layout| -> Result<(), String> {
                 log::trace!(
-                    "assert_fits_layout(ptr = {ptr:#p}..{:#p} (len = {}), layout = {layout:?})",
-                    unsafe { ptr.cast::<u8>().add(ptr.len()) },
-                    ptr.len()
+                    "assert_fits_layout(ptr = {}, layout = {layout:?})",
+                    FmtPtrSlice(ptr),
                 );
                 let actual_size = ptr.len();
                 let expected_size = layout.size();
@@ -494,6 +515,7 @@ impl Ops {
         // Assert that the given allocation is not overlapping with any other
         // live allocations.
         let assert_not_overlapping = |live: &LiveMap, ptr: NonNull<[u8]>| -> Result<(), String> {
+            log::trace!("assert_not_overlapping(ptr = {})", FmtPtrSlice(ptr));
             let ptr_start = ptr.cast::<u8>().as_ptr() as usize;
             let ptr_end = ptr_start + ptr.len();
             for other in live.map.values() {
@@ -514,7 +536,13 @@ impl Ops {
                          ptr: NonNull<[u8]>,
                          layout: std::alloc::Layout|
          -> Result<(), String> {
+            log::trace!(
+                "new_alloc(id{id}, ptr = {}, layout = {layout:?})",
+                FmtPtrSlice(ptr)
+            );
+
             if let Some(old_alloc) = live.remove(id) {
+                log::trace!("have a previous allocation for id{id}; deallocating it");
                 dealloc(id, old_alloc);
             }
 
@@ -546,14 +574,20 @@ impl Ops {
                                 ptr: NonNull<[u8]>,
                                 layout: std::alloc::Layout|
          -> Result<(), String> {
+            log::trace!(
+                "new_alloc_zeroed(id{id}, ptr = {}, layout = {layout:?})",
+                FmtPtrSlice(ptr)
+            );
+
             if let Some(old_alloc) = live.remove(id) {
+                log::trace!("have a previous allocation for id{id}; deallocating it");
                 dealloc(id, old_alloc);
             }
 
             log::debug!(
-                    "new zeroed allocation: id{id} -> {{ address: {ptr:p}, size: {}, layout: {layout:?} }}",
-                    ptr.len(),
-                );
+                "new zeroed allocation: id{id} -> {{ ptr: {}, layout: {layout:?} }}",
+                FmtPtrSlice(ptr),
+            );
 
             assert_fits_layout(ptr, layout)?;
             assert_not_overlapping(&live, ptr)?;
@@ -577,6 +611,16 @@ impl Ops {
                                    size: usize,
                                    zeroed: bool|
          -> Result<(), String> {
+            log::trace!(
+                "check_resized_bytes(ptr = {}, size = {size}, zeroed = {zeroed})",
+                FmtPtrSlice(ptr)
+            );
+            assert!(size <= ptr.len());
+
+            log::trace!(
+                "checking {}",
+                FmtPtrSlice(NonNull::slice_from_raw_parts(ptr.cast::<u8>(), size))
+            );
             let slice = unsafe { ptr.as_ref() };
             let slice = &slice[..size];
 
@@ -596,11 +640,14 @@ impl Ops {
             match op {
                 Op::Alloc { id, layout } => {
                     if live.beyond_allocation_limit(layout.size()) {
+                        log::trace!("beyond allocation limit; skipping");
                         continue;
                     }
 
                     let layout = layout.alloc_layout();
+                    log::trace!("id{id} = allocate({layout:?})");
                     if let Ok(ptr) = allocator.allocate(layout) {
+                        log::trace!("    -> {}", FmtPtrSlice(ptr));
                         new_alloc(&mut live, *id, ptr, layout)?;
                     }
                 }
@@ -620,11 +667,14 @@ impl Ops {
 
                 Op::AllocZeroed { id, layout } => {
                     if live.beyond_allocation_limit(layout.size()) {
+                        log::trace!("beyond allocation limit; skipping");
                         continue;
                     }
 
                     let layout = layout.alloc_layout();
+                    log::trace!("id{id} = allocate_zeroed({layout:?})");
                     if let Ok(ptr) = allocator.allocate_zeroed(layout) {
+                        log::trace!("    -> {}", FmtPtrSlice(ptr));
                         new_alloc_zeroed(&mut live, *id, ptr, layout)?;
                     }
                 }
@@ -636,9 +686,15 @@ impl Ops {
                             && !live.beyond_allocation_limit(new_layout.size())
                         {
                             match unsafe {
+                                log::trace!(
+                                    "id{id} = grow({}, {:?}, {new_layout:?})",
+                                    FmtPtrSlice(old_alloc.ptr),
+                                    old_alloc.layout
+                                );
                                 allocator.grow(old_alloc.ptr.cast(), old_alloc.layout, new_layout)
                             } {
                                 Ok(new_ptr) => {
+                                    log::trace!("    -> {}", FmtPtrSlice(new_ptr));
                                     check_resized_bytes(
                                         new_ptr,
                                         old_alloc.layout.size(),
@@ -649,12 +705,16 @@ impl Ops {
                                 Err(_) => {
                                     // Growing failed; just put it back
                                     // unmodified.
+                                    log::trace!("    --> grow failed");
                                     live.insert(*id, old_alloc);
                                 }
                             }
                         } else {
                             // Cannot grow an allocation to a smaller size; just
                             // put it back unmodified.
+                            log::trace!(
+                                "growing to smaller size or beyond allocation limit; skipping"
+                            );
                             live.insert(*id, old_alloc);
                         }
                     }
@@ -667,6 +727,11 @@ impl Ops {
                             && !live.beyond_allocation_limit(new_layout.size())
                         {
                             match unsafe {
+                                log::trace!(
+                                    "id{id} = grow_zeroed({}, {:?}, {new_layout:?})",
+                                    FmtPtrSlice(old_alloc.ptr),
+                                    old_alloc.layout
+                                );
                                 allocator.grow_zeroed(
                                     old_alloc.ptr.cast(),
                                     old_alloc.layout,
@@ -674,6 +739,7 @@ impl Ops {
                                 )
                             } {
                                 Ok(new_ptr) => {
+                                    log::trace!("    -> {}", FmtPtrSlice(new_ptr));
                                     check_resized_bytes(
                                         new_ptr,
                                         old_alloc.layout.size(),
@@ -693,12 +759,16 @@ impl Ops {
                                 Err(_) => {
                                     // Growing failed; just put it back
                                     // unmodified.
+                                    log::trace!("    --> grow_zeroed failed");
                                     live.insert(*id, old_alloc);
                                 }
                             }
                         } else {
                             // Cannot grow an allocation to a smaller size; just
                             // put it back unmodified.
+                            log::trace!(
+                                "growing to smaller size or beyond allocation limit; skipping"
+                            );
                             live.insert(*id, old_alloc);
                         }
                     }
@@ -709,9 +779,15 @@ impl Ops {
                     if let Some(old_alloc) = live.remove(*id) {
                         if old_alloc.layout.size() >= new_layout.size() {
                             match unsafe {
+                                log::trace!(
+                                    "id{id} = shrink({}, {:?}, {new_layout:?})",
+                                    FmtPtrSlice(old_alloc.ptr),
+                                    old_alloc.layout
+                                );
                                 allocator.shrink(old_alloc.ptr.cast(), old_alloc.layout, new_layout)
                             } {
                                 Ok(new_ptr) => {
+                                    log::trace!("    -> {}", FmtPtrSlice(new_ptr));
                                     check_resized_bytes(
                                         new_ptr,
                                         new_layout.size(),
@@ -725,12 +801,14 @@ impl Ops {
                                 Err(_) => {
                                     // Shrinking failed; just put it back
                                     // unmodified.
+                                    log::trace!("    --> shrink failed");
                                     live.insert(*id, old_alloc);
                                 }
                             }
                         } else {
                             // Cannot shrink an allocation to a larger size; just
                             // put it back unmodified.
+                            log::trace!("shrinking to larger size; skipping");
                             live.insert(*id, old_alloc);
                         }
                     }
@@ -751,10 +829,15 @@ impl Ops {
             }
         }
 
-        // Finally, deallocate any remaining live allocations.
+        // Finally, deallocate any remaining live allocations and return any
+        // zeroed allocations that the allocator is holding onto back to the
+        // global allocator..
+        log::trace!("Done running ops; deallocating remaining live allocations");
         for (id, alloc) in live.map {
             dealloc(id, alloc);
         }
+        log::trace!("returning zeroed-memory to system allocator");
+        allocator.return_zeroed_memory_to_inner();
 
         Ok(())
     }
@@ -785,8 +868,7 @@ impl std::fmt::Debug for LiveAlloc {
             zeroed,
         } = self;
         f.debug_struct("LiveAlloc")
-            .field("ptr", &format!("{ptr:p}"))
-            .field("size", &ptr.len())
+            .field("ptr", &FmtPtrSlice(*ptr))
             .field("layout", &layout)
             .field("zeroed", &zeroed)
             .finish()
