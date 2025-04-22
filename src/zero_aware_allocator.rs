@@ -449,7 +449,7 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if user_old_layout.size() == 0 {
-            return self.grow(ptr, user_old_layout, new_layout);
+            return self.inner.grow(ptr, user_old_layout, new_layout);
         }
 
         let actual_old_layout = match self.pre_grow(ptr, user_old_layout, new_layout) {
@@ -501,7 +501,7 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if user_old_layout.size() == 0 {
-            return self.allocate_zeroed(new_layout);
+            return self.inner.allocate_zeroed(new_layout);
         }
 
         let actual_old_layout = match self.pre_grow(ptr, user_old_layout, new_layout) {
