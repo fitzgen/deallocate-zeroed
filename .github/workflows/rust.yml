@@ -37,7 +37,7 @@ jobs:
 
     # Smoke test: run the fuzzer for 3 minutes.
     - run: cargo fuzz build ops
-    - run: RUST_LOG=trace cargo fuzz run ops -- -max_total_time=180 -detect_leaks=0 2> fuzz.log
+    - run: RUST_LOG=trace cargo fuzz run ops -- -max_total_time=180 2> fuzz.log
 
     # Upload fuzzing artifacts for debugging on failure.
     - uses: actions/upload-artifact@v4
