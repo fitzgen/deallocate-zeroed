@@ -683,11 +683,18 @@ where
         }
 
         let new = self.allocate_zeroed(new_layout)?;
+
+        // Copy over the old allocation's contents into the new allocation.
         ptr::copy_nonoverlapping(
             ptr.as_ptr().cast_const(),
             new.cast().as_ptr(),
             user_old_layout.size(),
         );
+
+        // Successful growing takes ownership of the old allocation, so we need
+        // to free it since it isn't being reused.
+        self.inner.deallocate(ptr, actual_old_layout);
+
         Ok(new)
     }
 
