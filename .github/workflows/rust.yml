@@ -29,6 +29,12 @@ jobs:
     # Smoke test: run the fuzzer for 3 minutes.
     - run: cargo fuzz run ops -- -timeout=180
 
+  fuzzing_crate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: cargo test -p deallocate-zeroed-fuzzing
+
   build:
     runs-on: ubuntu-latest
     strategy:
