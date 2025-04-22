@@ -283,9 +283,24 @@ where
         let zeroed = &mut *zeroed;
         let node = match zeroed.live_set.remove(&ptr) {
             Some(node) => {
-                // The actual layout should contain the user layout.
-                debug_assert!(node.layout().size() >= layout.size());
-                debug_assert!(node.layout().align() >= layout.align());
+                debug_assert!(
+                    node.layout().size() >= layout.size(),
+                    "actual size should be greater than or equal to user's size\n\
+                     actual size = {}\n\
+                     user's size = {}",
+                    node.layout().size(),
+                    layout.size(),
+                );
+
+                // NB: the allocation might just happen to be aligned to the
+                // user layout, in which case it may *not* have been the case
+                // that the actual layout's alignment is greater than or equal
+                // to the user layout's alignment.
+                //
+                // The pointer itself must be suitably aligned to the layout
+                // either way, however.
+                debug_assert_eq!(ptr.as_ptr() as usize % node.layout().align(), 0);
+
                 // And any fragmentation we had accepted still be zeroed.
                 debug_assert!({
                     let slice = core::slice::from_raw_parts(
@@ -294,6 +309,7 @@ where
                     );
                     slice.iter().all(|b| *b == 0)
                 });
+
                 node
             }
             None => match self.allocate_block_info(ptr, layout) {
