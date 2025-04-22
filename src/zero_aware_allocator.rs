@@ -333,7 +333,7 @@ where
         let mut zeroed = self.zeroed.lock();
         let zeroed = &mut *zeroed;
 
-        if let Some(node) = zeroed.live_set.find(&ptr) {
+        let actual_old_layout = if let Some(node) = zeroed.live_set.find(&ptr) {
             debug_assert_eq!(node.ptr(), ptr);
             debug_assert!(node.layout().size() >= user_old_layout.size());
             debug_assert!(node.layout().align() >= user_old_layout.align());
@@ -367,13 +367,17 @@ where
                 .expect("just found the node in the live-set, should still be there");
             self.deallocate_block_info(node);
 
-            PreGrow::DoGrow { actual_old_layout }
+            actual_old_layout
         } else {
             // This is not an allocation we are managing: use the user's
             // given old layout.
-            PreGrow::DoGrow {
-                actual_old_layout: user_old_layout,
-            }
+            user_old_layout
+        };
+
+        if new_layout.size() >= actual_old_layout.size() {
+            PreGrow::DoGrow { actual_old_layout }
+        } else {
+            PreGrow::DoShrink { actual_old_layout }
         }
     }
 }
@@ -385,9 +389,16 @@ enum PreGrow {
         ptr: NonNull<[u8]>,
         actual_layout: Layout,
     },
+
     /// The underlying allocation cannot satisfy the growth request, we need to
-    /// actually grow or re-alloc.
+    /// use the inner allocator to grow.
     DoGrow { actual_old_layout: Layout },
+
+    /// The underlying allocation cannot satisfy the growth request due to
+    /// less-than-requested alignment, but its actual size is *larger* than the
+    /// new layout's size. Therefore, we need to use the inner allocator to
+    /// shrink instead of grow.
+    DoShrink { actual_old_layout: Layout },
 }
 
 impl<A, L> Drop for ZeroAwareAllocator<A, L>
@@ -459,9 +470,14 @@ where
             } => {
                 // No need to update our metadata here: the caller is
                 // responsible for keeping track of the correct `Layout` and the
-                // size of the actual underlying block didn't grow os we have
+                // size of the actual underlying block didn't grow as we have
                 // nothing to change.
                 return Ok(ptr);
+            }
+            PreGrow::DoShrink { actual_old_layout } => {
+                // No need to update any metadata here, we are no longer
+                // managing this allocation, the inner allocator is.
+                return self.inner.shrink(ptr, actual_old_layout, new_layout);
             }
             PreGrow::DoGrow { actual_old_layout } => actual_old_layout,
         };
@@ -519,6 +535,22 @@ where
                 // size of the actual underlying block didn't grow os we have
                 // nothing to change.
                 return Ok(ptr);
+            }
+            PreGrow::DoShrink { actual_old_layout } => {
+                let new_ptr = self.inner.shrink(ptr, actual_old_layout, new_layout)?;
+
+                // We need to zero the range of bytes between the user's old
+                // size and the new size, which should be within the shrunken
+                // area.
+                debug_assert!(new_layout.size() < actual_old_layout.size());
+                debug_assert!(new_layout.size() >= user_old_layout.size());
+                let to_zero = new_ptr.cast::<u8>().add(user_old_layout.size());
+                let to_zero_len = new_layout.size() - user_old_layout.size();
+                to_zero.write_bytes(0, to_zero_len);
+
+                // No need to update our metadata here: we are no longer
+                // managing this allocation, the inner allocator is.
+                return Ok(new_ptr);
             }
             PreGrow::DoGrow { actual_old_layout } => actual_old_layout,
         };
