@@ -251,6 +251,40 @@ where
                 // allocator and return the block.
                 if let Some(node) = freelist.remove(&layout) {
                     let ret = node.non_null_slice_ptr();
+
+                    // Correctly sized.
+                    debug_assert!(
+                        ret.len() >= layout.size(),
+                        "{ret:#p}'s size should be greater than or equal to user layout's size\n\
+                         actual size        = {}\n\
+                         user layout's size = {}",
+                        ret.len(),
+                        layout.size()
+                    );
+                    debug_assert!(
+                        ret.len() >= node.layout().size(),
+                        "{ret:#p}'s size should be greater than or equal to its original layout's size\n\
+                         actual size            = {}\n\
+                         original layout's size = {}",
+                        ret.len(),
+                        layout.size()
+                    );
+
+                    // Correctly aligned.
+                    debug_assert_eq!(
+                        ret.cast::<u8>().as_ptr() as usize % layout.align(),
+                        0,
+                        "{ret:#p} should be aligned to user layout's alignment of {:#x}",
+                        layout.align()
+                    );
+                    debug_assert_eq!(
+                        ret.cast::<u8>().as_ptr() as usize % node.layout().align(),
+                        0,
+                        "{ret:#p} should be aligned to user layout's alignment of {:#x}",
+                        node.layout().align()
+                    );
+
+                    // Correctly zeroed.
                     debug_assert!({
                         let slice = unsafe {
                             core::slice::from_raw_parts(
@@ -260,6 +294,7 @@ where
                         };
                         slice.iter().all(|b| *b == 0)
                     });
+
                     zeroed.live_set.insert(node);
                     return Ok(ret);
                 }
@@ -273,11 +308,17 @@ where
 
     #[inline]
     unsafe fn deallocate_already_zeroed(&self, ptr: NonNull<u8>, layout: Layout) {
+        // Correctly sized.
+        debug_assert_ne!(layout.size(), 0);
+
+        // Correctly aligned.
+        debug_assert_eq!(ptr.as_ptr() as usize % layout.align(), 0);
+
+        // Correctly zeroed.
         debug_assert!({
             let slice = core::slice::from_raw_parts(ptr.as_ptr().cast_const(), layout.size());
             slice.iter().all(|b| *b == 0)
         });
-        debug_assert_ne!(layout.size(), 0);
 
         let mut zeroed = self.zeroed.lock();
         let zeroed = &mut *zeroed;
