@@ -251,6 +251,40 @@ where
                 // allocator and return the block.
                 if let Some(node) = freelist.remove(&layout) {
                     let ret = node.non_null_slice_ptr();
+
+                    // Correctly sized.
+                    debug_assert!(
+                        ret.len() >= layout.size(),
+                        "{ret:#p}'s size should be greater than or equal to user layout's size\n\
+                         actual size        = {}\n\
+                         user layout's size = {}",
+                        ret.len(),
+                        layout.size()
+                    );
+                    debug_assert!(
+                        ret.len() >= node.layout().size(),
+                        "{ret:#p}'s size should be greater than or equal to its original layout's size\n\
+                         actual size            = {}\n\
+                         original layout's size = {}",
+                        ret.len(),
+                        layout.size()
+                    );
+
+                    // Correctly aligned.
+                    debug_assert_eq!(
+                        ret.cast::<u8>().as_ptr() as usize % layout.align(),
+                        0,
+                        "{ret:#p} should be aligned to user layout's alignment of {:#x}",
+                        layout.align()
+                    );
+                    debug_assert_eq!(
+                        ret.cast::<u8>().as_ptr() as usize % node.layout().align(),
+                        0,
+                        "{ret:#p} should be aligned to user layout's alignment of {:#x}",
+                        node.layout().align()
+                    );
+
+                    // Correctly zeroed.
                     debug_assert!({
                         let slice = unsafe {
                             core::slice::from_raw_parts(
@@ -260,6 +294,7 @@ where
                         };
                         slice.iter().all(|b| *b == 0)
                     });
+
                     zeroed.live_set.insert(node);
                     return Ok(ret);
                 }
@@ -273,19 +308,40 @@ where
 
     #[inline]
     unsafe fn deallocate_already_zeroed(&self, ptr: NonNull<u8>, layout: Layout) {
+        // Correctly sized.
+        debug_assert_ne!(layout.size(), 0);
+
+        // Correctly aligned.
+        debug_assert_eq!(ptr.as_ptr() as usize % layout.align(), 0);
+
+        // Correctly zeroed.
         debug_assert!({
             let slice = core::slice::from_raw_parts(ptr.as_ptr().cast_const(), layout.size());
             slice.iter().all(|b| *b == 0)
         });
-        debug_assert_ne!(layout.size(), 0);
 
         let mut zeroed = self.zeroed.lock();
         let zeroed = &mut *zeroed;
         let node = match zeroed.live_set.remove(&ptr) {
             Some(node) => {
-                // The actual layout should contain the user layout.
-                debug_assert!(node.layout().size() >= layout.size());
-                debug_assert!(node.layout().align() >= layout.align());
+                debug_assert!(
+                    node.layout().size() >= layout.size(),
+                    "actual size should be greater than or equal to user's size\n\
+                     actual size = {}\n\
+                     user's size = {}",
+                    node.layout().size(),
+                    layout.size(),
+                );
+
+                // NB: the allocation might just happen to be aligned to the
+                // user layout, in which case it may *not* have been the case
+                // that the actual layout's alignment is greater than or equal
+                // to the user layout's alignment.
+                //
+                // The pointer itself must be suitably aligned to the layout
+                // either way, however.
+                debug_assert_eq!(ptr.as_ptr() as usize % node.layout().align(), 0);
+
                 // And any fragmentation we had accepted still be zeroed.
                 debug_assert!({
                     let slice = core::slice::from_raw_parts(
@@ -294,6 +350,7 @@ where
                     );
                     slice.iter().all(|b| *b == 0)
                 });
+
                 node
             }
             None => match self.allocate_block_info(ptr, layout) {
@@ -330,13 +387,38 @@ where
         user_old_layout: Layout,
         new_layout: Layout,
     ) -> PreGrow {
+        // Correctly sized.
+        debug_assert_ne!(user_old_layout.size(), 0);
+
+        // Correctly aligned.
+        debug_assert_eq!(
+            ptr.as_ptr() as usize % user_old_layout.align(),
+            0,
+            "{ptr:#p} should be aligned to user's layout's alignment of {:#x}",
+            user_old_layout.align()
+        );
+
         let mut zeroed = self.zeroed.lock();
         let zeroed = &mut *zeroed;
 
-        if let Some(node) = zeroed.live_set.find(&ptr) {
+        let actual_old_layout = if let Some(node) = zeroed.live_set.find(&ptr) {
             debug_assert_eq!(node.ptr(), ptr);
+
+            // Correctly sized.
             debug_assert!(node.layout().size() >= user_old_layout.size());
-            debug_assert!(node.layout().align() >= user_old_layout.align());
+
+            // Correctly aligned.
+            //
+            // NB: it is not necessarily the case that the original layout's
+            // align is greater than or equal to the user layout's align in the
+            // case where we reused an allocation that happened to be aligned
+            // greater than its original layout requested.
+            debug_assert_eq!(
+                ptr.as_ptr() as usize % node.layout().align(),
+                0,
+                "{ptr:#p} should be aligned to original layout's alignment of {:#x}",
+                node.layout().align()
+            );
 
             // If this is an allocation that was originally already zeroed,
             // and its original inner layout can already satisfy this new
@@ -367,13 +449,17 @@ where
                 .expect("just found the node in the live-set, should still be there");
             self.deallocate_block_info(node);
 
-            PreGrow::DoGrow { actual_old_layout }
+            actual_old_layout
         } else {
             // This is not an allocation we are managing: use the user's
             // given old layout.
-            PreGrow::DoGrow {
-                actual_old_layout: user_old_layout,
-            }
+            user_old_layout
+        };
+
+        if new_layout.size() >= actual_old_layout.size() {
+            PreGrow::DoGrow { actual_old_layout }
+        } else {
+            PreGrow::DoShrink { actual_old_layout }
         }
     }
 }
@@ -385,9 +471,41 @@ enum PreGrow {
         ptr: NonNull<[u8]>,
         actual_layout: Layout,
     },
+
     /// The underlying allocation cannot satisfy the growth request, we need to
-    /// actually grow or re-alloc.
+    /// use the inner allocator to grow.
     DoGrow { actual_old_layout: Layout },
+
+    /// The underlying allocation cannot satisfy the growth request due to
+    /// less-than-requested alignment, but its actual size is *larger* than the
+    /// new layout's size. Therefore, we need to use the inner allocator to
+    /// shrink instead of grow.
+    ///
+    /// For example, consider this sequence of events:
+    ///
+    /// * `allocate(Layout { size: 4096, align: 16 }) -> 0x12345670`
+    ///
+    ///   An initial allocation satisfied via the inner allocator.
+    ///
+    /// * `deallocate_zeroed(0x12345670, ..)`
+    ///
+    ///   That allocation is now tracked in our internal free lists for
+    ///   already-zeroed blocks.
+    ///
+    /// * `allocate_zeroed(Layout { size: 4000, align: 16 }) -> 0x12345670`
+    ///
+    ///   We satisfy a new zeroed-allocation request with this block, accepting
+    ///   that it will result in some small amount of fragmentation slop.
+    ///
+    /// * `grow(0x12345670, Layout { size: 4001, align: 256 })`
+    ///
+    ///   The user wants to grow the allocation by one byte *and* realign it to
+    ///   256. Although we have capacity in this allocation for that growth, it
+    ///   is not aligned to 256. Because the original, underlying allocation's
+    ///   size is larger than the new size that the user has asked us to "grow"
+    ///   this allocation to, we must actually call the inner allocator's
+    ///   `shrink` method.
+    DoShrink { actual_old_layout: Layout },
 }
 
 impl<A, L> Drop for ZeroAwareAllocator<A, L>
@@ -449,7 +567,7 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if user_old_layout.size() == 0 {
-            return self.grow(ptr, user_old_layout, new_layout);
+            return self.inner.grow(ptr, user_old_layout, new_layout);
         }
 
         let actual_old_layout = match self.pre_grow(ptr, user_old_layout, new_layout) {
@@ -459,9 +577,14 @@ where
             } => {
                 // No need to update our metadata here: the caller is
                 // responsible for keeping track of the correct `Layout` and the
-                // size of the actual underlying block didn't grow os we have
+                // size of the actual underlying block didn't grow as we have
                 // nothing to change.
                 return Ok(ptr);
+            }
+            PreGrow::DoShrink { actual_old_layout } => {
+                // No need to update any metadata here, we are no longer
+                // managing this allocation, the inner allocator is.
+                return self.inner.shrink(ptr, actual_old_layout, new_layout);
             }
             PreGrow::DoGrow { actual_old_layout } => actual_old_layout,
         };
@@ -501,7 +624,7 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if user_old_layout.size() == 0 {
-            return self.allocate_zeroed(new_layout);
+            return self.inner.allocate_zeroed(new_layout);
         }
 
         let actual_old_layout = match self.pre_grow(ptr, user_old_layout, new_layout) {
@@ -519,6 +642,22 @@ where
                 // size of the actual underlying block didn't grow os we have
                 // nothing to change.
                 return Ok(ptr);
+            }
+            PreGrow::DoShrink { actual_old_layout } => {
+                let new_ptr = self.inner.shrink(ptr, actual_old_layout, new_layout)?;
+
+                // We need to zero the range of bytes between the user's old
+                // size and the new size, which should be within the shrunken
+                // area.
+                debug_assert!(new_layout.size() < actual_old_layout.size());
+                debug_assert!(new_layout.size() >= user_old_layout.size());
+                let to_zero = new_ptr.cast::<u8>().add(user_old_layout.size());
+                let to_zero_len = new_layout.size() - user_old_layout.size();
+                to_zero.write_bytes(0, to_zero_len);
+
+                // No need to update our metadata here: we are no longer
+                // managing this allocation, the inner allocator is.
+                return Ok(new_ptr);
             }
             PreGrow::DoGrow { actual_old_layout } => actual_old_layout,
         };
@@ -544,11 +683,18 @@ where
         }
 
         let new = self.allocate_zeroed(new_layout)?;
+
+        // Copy over the old allocation's contents into the new allocation.
         ptr::copy_nonoverlapping(
             ptr.as_ptr().cast_const(),
             new.cast().as_ptr(),
             user_old_layout.size(),
         );
+
+        // Successful growing takes ownership of the old allocation, so we need
+        // to free it since it isn't being reused.
+        self.inner.deallocate(ptr, actual_old_layout);
+
         Ok(new)
     }
 
